@@ -1,0 +1,91 @@
+<body style="margin:0px;width:100vw;height:100vh;font-family:sans-serif;" id="game_frame">
+<div id="launcher">
+<div class="stars" id="stars"></div>
+
+<header class="lhead">
+	<div id="logo"></div>
+	<div class="tag">browser edition</div>
+</header>
+
+<main class="lmain">
+	<nav class="lnav">
+		<button class="nav on" data-tab="play">Play</button>
+		<button class="nav" data-tab="profile">Profile</button>
+		<button class="nav" data-tab="packs">Texture Packs</button>
+		<button class="nav" data-tab="mods">Mods</button>
+	</nav>
+
+	<section class="lpanel">
+
+		<div class="tab on" id="tab-play">
+			<h3>Ready for launch</h3>
+			<div class="row"><span class="k">Player</span><span class="v" id="pvName">not set</span></div>
+			<div class="row"><span class="k">Skin</span><span class="v" id="pvSkin">default</span></div>
+			<div class="row"><span class="k">Cape</span><span class="v" id="pvCape">none</span></div>
+			<div class="row"><span class="k">Texture pack</span><span class="v" id="pvPack">Default</span></div>
+			<div class="row"><span class="k">Mods</span><span class="v" id="pvMods">0 enabled</span></div>
+			<div class="row"><span class="k">Version</span><span class="v">1.5.2</span></div>
+			<p class="note">Worlds are saved inside this browser, on this device. Clearing your browser
+			data will delete them, so export anything you care about from the in-game menu.</p>
+		</div>
+
+		<div class="tab" id="tab-profile">
+			<h3>Profile</h3>
+			<label for="uname">Username</label>
+			<input type="text" id="uname" maxlength="16" spellcheck="false" autocomplete="off" placeholder="Username">
+			<div class="err" id="unameErr"></div>
+
+			<div class="two">
+				<div class="slot">
+					<div class="slotHead"><b>Skin</b> &middot; 64&times;32 or 64&times;64 png</div>
+					<canvas class="prev" id="skinPrev" width="128" height="128"></canvas>
+					<button class="btn mini" id="skinPick">Choose file</button>
+					<button class="btn mini ghost" id="skinClear">Remove</button>
+					<label class="chk"><input type="checkbox" id="slim"> slim (alex) arms</label>
+					<div class="err" id="skinErr"></div>
+				</div>
+				<div class="slot">
+					<div class="slotHead"><b>Cape</b> &middot; 32&times;32 png</div>
+					<canvas class="prev" id="capePrev" width="128" height="128"></canvas>
+					<button class="btn mini" id="capePick">Choose file</button>
+					<button class="btn mini ghost" id="capeClear">Remove</button>
+					<div class="err" id="capeErr"></div>
+				</div>
+			</div>
+
+			<div class="ok" id="profMsg"></div>
+			<p class="note">Your username, skin and cape are stored in this browser and applied
+			automatically every time you play &mdash; you only set them once.</p>
+		</div>
+
+		<div class="tab" id="tab-packs">
+			<h3>Texture packs</h3>
+			<div id="packList"></div>
+			<button class="btn" id="packAdd">Add .epk pack</button>
+			<p class="note">Texture packs for this version ship as <b>.epk</b> files. Add one and it is
+			stored in this browser, ready to pick before you launch. The bundled Default pack
+			cannot be removed.</p>
+		</div>
+
+		<div class="tab" id="tab-mods">
+			<h3>Mods</h3>
+			<div id="modList"></div>
+			<button class="btn" id="modAdd">Add .js mod</button>
+			<p class="note">This build has no Java mod loader, so mods here are <b>JavaScript</b> files
+			that run in the page a moment before the game boots &mdash; enough to change launch options,
+			servers or page behaviour, not to add blocks or items. Only add files you trust: a mod
+			can do anything this page can.</p>
+		</div>
+
+	</section>
+</main>
+
+<footer class="lfoot">
+	<div class="acct">
+		<div class="who" id="footName">Not signed in</div>
+		<div class="sub" id="footSub">set a username in profile</div>
+	</div>
+	<button id="playBtn" onclick="Launch()">PLAY</button>
+</footer>
+
+<select id="packs" style="display:none">

@@ -1,0 +1,584 @@
+</select>
+</div>
+
+<script type="text/javascript">
+(function () {
+"use strict";
+
+/* ========================================================================
+   SPACECRAFT launcher
+   Stores the player's username, skin, cape, texture packs and mods in this
+   browser, then writes them into the game's own profile before boot.
+   ===================================================================== */
+
+var CFGKEY = "spacecraft.cfg";
+var PROFKEY = "_eaglercraft.p";
+var SETKEY = "_eaglercraft.g";
+var PROFILE_TPL = "CgAAAwACY3P/////AwACY2MAAAAACgAFY2FwZXMAAwACcHMAAAANAwACcGMAAAAAAwADbnNpAAAAIQoABXNraW5zAAEADWFjY2VwdExpY2Vuc2UBCAAEbmFtZQAKRWFnbFZpZ2c1NQA=";
+var SETTINGS_TPL = "CgAAAQAUc2VlbkFja25vd2xlZGdlbWVudHMBAA==";
+var SKIN_SIZES = [8192, 16384];   /* 64x32 and 64x64, RGBA */
+var CAPE_SIZE = 4096;             /* 32x32, RGBA */
+
+var cfg = loadCfg();
+var files = [];      /* packs + mods out of IndexedDB */
+var busy = false;
+
+/* ----------------------------------------------------------- small utils */
+function $(id) { return document.getElementById(id); }
+function loadCfg() {
+	var d = { username: "", pack: "default", skin: null, cape: null, mods: {} };
+	try {
+		var raw = localStorage.getItem(CFGKEY);
+		if (raw) { var o = JSON.parse(raw); for (var k in o) d[k] = o[k]; }
+	} catch (e) {}
+	return d;
+}
+function saveCfg() {
+	try { localStorage.setItem(CFGKEY, JSON.stringify(cfg)); return true; }
+	catch (e) { return false; }
+}
+function b64ToBytes(b64) {
+	var s = atob(b64), a = new Uint8Array(s.length);
+	for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i);
+	return a;
+}
+function bytesToB64(a) {
+	var s = "", CH = 8192;
+	for (var i = 0; i < a.length; i += CH)
+		s += String.fromCharCode.apply(null, a.subarray(i, i + CH));
+	return btoa(s);
+}
+function ascii(bytes) {
+	var s = "";
+	for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+	return s;
+}
+function toAscii(str) {
+	var a = new Uint8Array(str.length);
+	for (var i = 0; i < str.length; i++) a[i] = str.charCodeAt(i) & 255;
+	return a;
+}
+
+/* ---------------------------------------------------- NBT read and write
+   Everything the launcher does not understand is kept byte for byte, so an
+   in-game change to the profile survives a launcher write and vice versa. */
+function NbtR(d) { this.d = d; this.p = 0; }
+NbtR.prototype.u1 = function () { return this.d[this.p++]; };
+NbtR.prototype.u2 = function () { var v = (this.d[this.p] << 8) | this.d[this.p + 1]; this.p += 2; return v; };
+NbtR.prototype.i4 = function () {
+	var v = (this.d[this.p] << 24) | (this.d[this.p + 1] << 16) | (this.d[this.p + 2] << 8) | this.d[this.p + 3];
+	this.p += 4; return v | 0;
+};
+NbtR.prototype.take = function (n) { var s = this.d.subarray(this.p, this.p + n); this.p += n; return s; };
+NbtR.prototype.nm = function () { return this.take(this.u2()); };
+NbtR.prototype.tag = function (t) {
+	var n, i, a, et;
+	switch (t) {
+		case 1: return { t: 1, raw: this.take(1) };
+		case 2: return { t: 2, raw: this.take(2) };
+		case 3: return { t: 3, v: this.i4() };
+		case 4: return { t: 4, raw: this.take(8) };
+		case 5: return { t: 5, raw: this.take(4) };
+		case 6: return { t: 6, raw: this.take(8) };
+		case 7: n = this.i4(); return { t: 7, v: this.take(n) };
+		case 8: return { t: 8, v: this.nm() };
+		case 9:
+			et = this.u1(); n = this.i4(); a = [];
+			for (i = 0; i < n; i++) a.push(this.tag(et));
+			return { t: 9, et: et, v: a };
+		case 10: return { t: 10, v: this.compound() };
+		case 11: n = this.i4(); return { t: 11, n: n, raw: this.take(n * 4) };
+		default: throw new Error("unknown nbt tag " + t);
+	}
+};
+NbtR.prototype.compound = function () {
+	var out = [];
+	for (;;) {
+		var t = this.u1();
+		if (t === 0 || t === undefined) return out;
+		var nm = this.nm();
+		out.push({ name: ascii(nm), tag: this.tag(t) });
+	}
+};
+
+function NbtW() { this.a = []; }
+NbtW.prototype.u1 = function (v) { this.a.push(v & 255); };
+NbtW.prototype.u2 = function (v) { this.a.push((v >> 8) & 255, v & 255); };
+NbtW.prototype.i4 = function (v) { this.a.push((v >> 24) & 255, (v >> 16) & 255, (v >> 8) & 255, v & 255); };
+NbtW.prototype.raw = function (b) { for (var i = 0; i < b.length; i++) this.a.push(b[i]); };
+NbtW.prototype.nm = function (b) { this.u2(b.length); this.raw(b); };
+NbtW.prototype.tag = function (g) {
+	switch (g.t) {
+		case 3: this.i4(g.v); break;
+		case 7: this.i4(g.v.length); this.raw(g.v); break;
+		case 8: this.nm(g.v); break;
+		case 9:
+			this.u1(g.et); this.i4(g.v.length);
+			for (var i = 0; i < g.v.length; i++) this.tag(g.v[i]);
+			break;
+		case 10: this.compound(g.v); break;
+		case 11: this.i4(g.n); this.raw(g.raw); break;
+		default: this.raw(g.raw);
+	}
+};
+NbtW.prototype.compound = function (list) {
+	for (var i = 0; i < list.length; i++) {
+		this.u1(list[i].tag.t);
+		this.nm(toAscii(list[i].name));
+		this.tag(list[i].tag);
+	}
+	this.u1(0);
+};
+
+function cSet(list, name, tag) {
+	for (var i = 0; i < list.length; i++) if (list[i].name === name) { list[i].tag = tag; return; }
+	list.push({ name: name, tag: tag });
+}
+
+/* Writes username / skin / cape into the game's stored profile. */
+function applyProfile() {
+	try {
+		var raw = localStorage.getItem(PROFKEY) || PROFILE_TPL;
+		var r, root;
+		try {
+			r = new NbtR(b64ToBytes(raw));
+			if (r.u1() !== 10) throw new Error("not a compound");
+			root = { name: r.nm(), list: r.compound() };
+		} catch (e) {
+			r = new NbtR(b64ToBytes(PROFILE_TPL));
+			r.u1(); root = { name: r.nm(), list: r.compound() };
+		}
+
+		cSet(root.list, "name", { t: 8, v: toAscii(cfg.username) });
+
+		if (cfg.skin) {
+			var sk = [
+				{ name: "data", tag: { t: 7, v: b64ToBytes(cfg.skin.b64) } },
+				{ name: "slim", tag: { t: 1, raw: new Uint8Array([cfg.skin.slim ? 1 : 0]) } }
+			];
+			cSet(root.list, "skins", { t: 10, v: [{ name: "spacecraft", tag: { t: 10, v: sk } }] });
+			cSet(root.list, "ps", { t: 3, v: -1 });   /* -1 = use a custom skin  */
+			cSet(root.list, "cs", { t: 3, v: 0 });    /*  0 = the first one      */
+		}
+		if (cfg.cape) {
+			var cp = [{ name: "data", tag: { t: 7, v: b64ToBytes(cfg.cape.b64) } }];
+			cSet(root.list, "capes", { t: 10, v: [{ name: "spacecraft", tag: { t: 10, v: cp } }] });
+			cSet(root.list, "pc", { t: 3, v: -1 });
+			cSet(root.list, "cc", { t: 3, v: 0 });
+		}
+
+		var w = new NbtW();
+		w.u1(10); w.nm(toAscii(root.name)); w.compound(root.list);
+		localStorage.setItem(PROFKEY, bytesToB64(new Uint8Array(w.a)));
+		if (!localStorage.getItem(SETKEY)) localStorage.setItem(SETKEY, SETTINGS_TPL);
+		return true;
+	} catch (e) { return false; }
+}
+
+/* --------------------------------------------------- IndexedDB for files */
+var DB = null;
+function db() {
+	return new Promise(function (res, rej) {
+		if (DB) return res(DB);
+		var q = indexedDB.open("spacecraft-launcher", 1);
+		q.onupgradeneeded = function () { q.result.createObjectStore("files", { keyPath: "id" }); };
+		q.onsuccess = function () { DB = q.result; res(DB); };
+		q.onerror = function () { rej(q.error); };
+	});
+}
+function dbAll() {
+	return db().then(function (d) {
+		return new Promise(function (res, rej) {
+			var q = d.transaction("files", "readonly").objectStore("files").getAll();
+			q.onsuccess = function () { res(q.result || []); };
+			q.onerror = function () { rej(q.error); };
+		});
+	});
+}
+function dbPut(o) {
+	return db().then(function (d) {
+		return new Promise(function (res, rej) {
+			var t = d.transaction("files", "readwrite");
+			t.objectStore("files").put(o);
+			t.oncomplete = function () { res(); };
+			t.onerror = function () { rej(t.error); };
+		});
+	});
+}
+function dbDel(id) {
+	return db().then(function (d) {
+		return new Promise(function (res, rej) {
+			var t = d.transaction("files", "readwrite");
+			t.objectStore("files").delete(id);
+			t.oncomplete = function () { res(); };
+			t.onerror = function () { rej(t.error); };
+		});
+	});
+}
+function refreshFiles() { return dbAll().then(function (r) { files = r; }); }
+
+/* ------------------------------------------------------------- the logo */
+var GLYPH = {
+	S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
+	P: ["11110", "10001", "10001", "11110", "10000", "10000", "10000"],
+	A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
+	C: ["01110", "10001", "10000", "10000", "10000", "10001", "01110"],
+	E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
+	R: ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
+	F: ["11111", "10000", "10000", "11110", "10000", "10000", "10000"],
+	T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"]
+};
+function drawLogo() {
+	var word = "SPACECRAFT", shade = "", face = "", x = 0;
+	for (var i = 0; i < word.length; i++) {
+		var g = GLYPH[word.charAt(i)];
+		for (var y = 0; y < 7; y++) for (var c = 0; c < 5; c++) {
+			if (g[y].charAt(c) !== "1") continue;
+			shade += '<rect x="' + (x + c + 1) + '" y="' + (y + 1) + '" width="1" height="1"/>';
+			face += '<rect x="' + (x + c) + '" y="' + y + '" width="1" height="1"/>';
+		}
+		x += 6;
+	}
+	$("logo").innerHTML =
+		'<svg viewBox="0 0 60 9" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">' +
+		'<defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">' +
+		'<stop offset="0" stop-color="#35d6ff"/><stop offset=".55" stop-color="#8f7bff"/>' +
+		'<stop offset="1" stop-color="#c56bff"/></linearGradient></defs>' +
+		'<g fill="#0a0d20">' + shade + '</g><g fill="url(#lg)">' + face + '</g></svg>';
+}
+function drawStars() {
+	var h = "";
+	for (var i = 0; i < 110; i++) {
+		var s = Math.random() < .12 ? 3 : (Math.random() < .4 ? 2 : 1);
+		h += '<i style="left:' + (Math.random() * 100).toFixed(2) + '%;top:' +
+			(Math.random() * 100).toFixed(2) + '%;width:' + s + 'px;height:' + s +
+			'px;opacity:' + (.15 + Math.random() * .65).toFixed(2) + '"></i>';
+	}
+	$("stars").innerHTML = h;
+}
+
+/* ---------------------------------------------------------- image import */
+function readImage(file, sizes, cb) {
+	var fr = new FileReader();
+	fr.onload = function () {
+		var img = new Image();
+		img.onload = function () {
+			var w = img.naturalWidth, h = img.naturalHeight;
+			var cv = document.createElement("canvas");
+			cv.width = w; cv.height = h;
+			var cx = cv.getContext("2d");
+			cx.clearRect(0, 0, w, h);
+			cx.drawImage(img, 0, 0);
+			var px;
+			try { px = cx.getImageData(0, 0, w, h).data; }
+			catch (e) { return cb("could not read that image"); }
+			if (sizes.indexOf(px.length) === -1)
+				return cb("wrong size: that png is " + w + "x" + h);
+			cb(null, { b64: bytesToB64(new Uint8Array(px.buffer.slice(0))), w: w, h: h, png: fr.result });
+		};
+		img.onerror = function () { cb("that file is not a png image"); };
+		img.src = fr.result;
+	};
+	fr.onerror = function () { cb("could not read that file"); };
+	fr.readAsDataURL(file);
+}
+function paintPrev(id, rec) {
+	var cv = $(id), cx = cv.getContext("2d");
+	cx.clearRect(0, 0, cv.width, cv.height);
+	if (!rec) return;
+	var img = new Image();
+	img.onload = function () {
+		var s = Math.min(cv.width / rec.w, cv.height / rec.h);
+		cx.imageSmoothingEnabled = false;
+		cx.drawImage(img, (cv.width - rec.w * s) / 2, (cv.height - rec.h * s) / 2, rec.w * s, rec.h * s);
+	};
+	img.src = rec.png;
+}
+
+/* ------------------------------------------------------------------ ui  */
+function packName(id) {
+	if (id === "default") return "Default";
+	for (var i = 0; i < files.length; i++) if (files[i].id === id) return files[i].name;
+	return "Default";
+}
+function modCount() {
+	var n = 0;
+	for (var i = 0; i < files.length; i++)
+		if (files[i].kind === "mod" && cfg.mods[files[i].id]) n++;
+	return n;
+}
+function renderPlay() {
+	$("pvName").textContent = cfg.username || "not set";
+	$("pvSkin").textContent = cfg.skin ? ("custom " + cfg.skin.w + "x" + cfg.skin.h +
+		(cfg.skin.slim ? " (slim)" : "")) : "default";
+	$("pvCape").textContent = cfg.cape ? "custom" : "none";
+	$("pvPack").textContent = packName(cfg.pack);
+	var n = modCount();
+	$("pvMods").textContent = n + (n === 1 ? " enabled" : " enabled");
+	$("footName").textContent = cfg.username || "Not signed in";
+	$("footSub").textContent = cfg.username ? "signed in on this browser" : "set a username in profile";
+}
+function renderPacks() {
+	var h = '<div class="item' + (cfg.pack === "default" ? " sel" : "") + '" data-pick="default">' +
+		'<span class="nm">Default</span><span class="sz">built in</span></div>';
+	for (var i = 0; i < files.length; i++) {
+		var f = files[i];
+		if (f.kind !== "pack") continue;
+		h += '<div class="item' + (cfg.pack === f.id ? " sel" : "") + '" data-pick="' + f.id + '">' +
+			'<span class="nm"></span><span class="sz">' + Math.round(f.size / 1024) + ' kb</span>' +
+			'<button class="btn mini ghost" data-del="' + f.id + '">remove</button></div>';
+	}
+	$("packList").innerHTML = h;
+	var rows = $("packList").querySelectorAll("[data-pick]");
+	for (var j = 0; j < rows.length; j++) {
+		var id = rows[j].getAttribute("data-pick");
+		var nmEl = rows[j].querySelector(".nm");
+		if (id !== "default") nmEl.textContent = packName(id);
+	}
+	$("packList").onclick = function (ev) {
+		var del = ev.target.getAttribute && ev.target.getAttribute("data-del");
+		if (del) {
+			ev.stopPropagation();
+			if (cfg.pack === del) { cfg.pack = "default"; saveCfg(); }
+			dbDel(del).then(refreshFiles).then(function () { renderPacks(); renderPlay(); });
+			return;
+		}
+		var row = ev.target;
+		while (row && !row.getAttribute("data-pick")) row = row.parentNode;
+		if (!row) return;
+		cfg.pack = row.getAttribute("data-pick");
+		saveCfg(); renderPacks(); renderPlay();
+	};
+}
+function renderMods() {
+	var h = "", any = false;
+	for (var i = 0; i < files.length; i++) {
+		var f = files[i];
+		if (f.kind !== "mod") continue;
+		any = true;
+		h += '<div class="item"><input type="checkbox" data-on="' + f.id + '"' +
+			(cfg.mods[f.id] ? " checked" : "") + '><span class="nm"></span>' +
+			'<span class="sz">' + Math.round(f.size / 1024) + ' kb</span>' +
+			'<button class="btn mini ghost" data-del="' + f.id + '">remove</button></div>';
+	}
+	if (!any) h = '<p class="note" style="margin:0 0 16px">No mods added yet.</p>';
+	$("modList").innerHTML = h;
+	var rows = $("modList").querySelectorAll(".item");
+	var k = 0;
+	for (var j = 0; j < files.length; j++) {
+		if (files[j].kind !== "mod") continue;
+		rows[k].querySelector(".nm").textContent = files[j].name;
+		k++;
+	}
+	$("modList").onclick = function (ev) {
+		var on = ev.target.getAttribute && ev.target.getAttribute("data-on");
+		if (on) { cfg.mods[on] = ev.target.checked; saveCfg(); renderPlay(); return; }
+		var del = ev.target.getAttribute && ev.target.getAttribute("data-del");
+		if (del) {
+			delete cfg.mods[del]; saveCfg();
+			dbDel(del).then(refreshFiles).then(function () { renderMods(); renderPlay(); });
+		}
+	};
+}
+
+function showTab(nm) {
+	var t = document.querySelectorAll(".tab"), n = document.querySelectorAll(".nav"), i;
+	for (i = 0; i < t.length; i++) t[i].className = "tab" + (t[i].id === "tab-" + nm ? " on" : "");
+	for (i = 0; i < n.length; i++)
+		n[i].className = "nav" + (n[i].getAttribute("data-tab") === nm ? " on" : "");
+}
+
+/* ------------------------------------------------------------- launching */
+function validName() {
+	var v = ($("uname").value || "").trim() || cfg.username || "";
+	if (!/^[A-Za-z0-9_]{3,16}$/.test(v)) {
+		showTab("profile");
+		$("unameErr").textContent = "3-16 letters, numbers or _ please.";
+		$("uname").focus();
+		return null;
+	}
+	$("unameErr").textContent = "";
+	cfg.username = v;
+	saveCfg();
+	return v;
+}
+function activePackURI() {
+	if (cfg.pack === "default")
+		return Promise.resolve("data:application/octet-stream;base64," + $("packs").value);
+	for (var i = 0; i < files.length; i++)
+		if (files[i].id === cfg.pack && files[i].kind === "pack")
+			return Promise.resolve("data:application/octet-stream;base64," + files[i].data);
+	cfg.pack = "default"; saveCfg();
+	return Promise.resolve("data:application/octet-stream;base64," + $("packs").value);
+}
+function runMods() {
+	for (var i = 0; i < files.length; i++) {
+		var f = files[i];
+		if (f.kind !== "mod" || !cfg.mods[f.id]) continue;
+		try { (new Function(f.data)).call(window); }
+		catch (e) { if (window.console) console.error("mod " + f.name + " failed:", e); }
+	}
+}
+
+function startGame(assetsURI) {
+	var relayId = Math.floor(Math.random() * 3);
+	window.eaglercraftOpts = {
+		container: "game_frame",
+		assetsURI: assetsURI,
+		serverWorkerURI: createWorkerURI("sp_worker"),
+		worldsFolder: "TEST",
+		assetOverrides: {},
+		servers: [
+			{ serverName: "VanillaCraft", serverAddress: "wss://play.vanillacraftsmp.org/" },
+			{ serverName: "SealCraft", serverAddress: "wss://sealcraft.ddns.net:442/servers" },
+			{ serverName: "BlobCraft", serverAddress: "wss://blobcraft.tk" },
+			{ serverName: "Aeon", serverAddress: "wss://aeon-network.net/aeon" }
+		],
+		hideDownServers: true,
+		relays: [
+			{ addr: "wss://relay.deev.is/", name: "Relay #1", primary: relayId == 0 },
+			{ addr: "wss://relay.lax1dude.net/", name: "Relay #2", primary: relayId == 1 },
+			{ addr: "wss://relay.shhnowisnottheti.me/", name: "Relay #3", primary: relayId == 2 }
+		],
+		mainMenu: {
+			splashes: [
+				"SPACECRAFT", "to the moon!", "made of stardust", "zero gravity, full blocks",
+				"runs in your browser!", "no install required", "blocks all the way down",
+				"watch out for creepers", "dig down, but not straight down",
+				"press F5 for third person", "your worlds save in this browser",
+				"torches fix everything", "when the impostor is sus...",
+				"Never gonna give you up", "I need more splash texts", "the skornky worngy",
+				"oh my goodness gracious", "waltre wite", "hop on mindustry"
+			],
+			eaglerLogo: true
+		}
+	};
+	$("launcher").style.display = "none";
+	main();
+}
+
+window.Launch = function () {
+	if (busy) return;
+	var name = validName();
+	if (!name) return;
+	busy = true;
+	var btn = $("playBtn");
+	btn.className = "busy";
+	btn.textContent = "starting...";
+	applyProfile();
+	activePackURI().then(function (uri) {
+		runMods();
+		startGame(uri);
+	}, function () {
+		busy = false;
+		btn.className = "";
+		btn.textContent = "PLAY";
+	});
+};
+
+/* ------------------------------------------------------------------ boot */
+window.addEventListener("load", function () {
+	drawLogo();
+	drawStars();
+
+	var navs = document.querySelectorAll(".nav");
+	for (var i = 0; i < navs.length; i++)
+		navs[i].onclick = function () { showTab(this.getAttribute("data-tab")); };
+
+	$("uname").value = cfg.username || "";
+	$("slim").checked = !!(cfg.skin && cfg.skin.slim);
+	paintPrev("skinPrev", cfg.skin);
+	paintPrev("capePrev", cfg.cape);
+
+	$("uname").oninput = function () {
+		var v = this.value.trim();
+		if (/^[A-Za-z0-9_]{3,16}$/.test(v)) {
+			cfg.username = v; saveCfg(); renderPlay();
+			$("unameErr").textContent = "";
+			$("profMsg").textContent = "saved";
+		} else {
+			$("profMsg").textContent = "";
+		}
+	};
+	$("uname").onkeydown = function (e) { if (e.key === "Enter") window.Launch(); };
+	$("slim").onchange = function () {
+		if (cfg.skin) { cfg.skin.slim = this.checked; saveCfg(); renderPlay(); $("profMsg").textContent = "saved"; }
+	};
+
+	function filePicker(accept, cb) {
+		var inp = document.createElement("input");
+		inp.type = "file";
+		inp.accept = accept;
+		inp.onchange = function () { if (inp.files && inp.files[0]) cb(inp.files[0]); };
+		inp.click();
+	}
+
+	$("skinPick").onclick = function () {
+		filePicker("image/png", function (f) {
+			readImage(f, SKIN_SIZES, function (err, rec) {
+				if (err) { $("skinErr").textContent = err; return; }
+				$("skinErr").textContent = "";
+				rec.slim = $("slim").checked;
+				cfg.skin = rec;
+				if (!saveCfg()) { $("skinErr").textContent = "no room left in browser storage"; cfg.skin = null; return; }
+				paintPrev("skinPrev", rec); renderPlay();
+				$("profMsg").textContent = "skin saved";
+			});
+		});
+	};
+	$("skinClear").onclick = function () {
+		cfg.skin = null; saveCfg(); paintPrev("skinPrev", null); renderPlay();
+		$("profMsg").textContent = "skin removed - the game keeps whatever it had before";
+	};
+	$("capePick").onclick = function () {
+		filePicker("image/png", function (f) {
+			readImage(f, [CAPE_SIZE], function (err, rec) {
+				if (err) { $("capeErr").textContent = err; return; }
+				$("capeErr").textContent = "";
+				cfg.cape = rec;
+				if (!saveCfg()) { $("capeErr").textContent = "no room left in browser storage"; cfg.cape = null; return; }
+				paintPrev("capePrev", rec); renderPlay();
+				$("profMsg").textContent = "cape saved";
+			});
+		});
+	};
+	$("capeClear").onclick = function () {
+		cfg.cape = null; saveCfg(); paintPrev("capePrev", null); renderPlay();
+		$("profMsg").textContent = "cape removed";
+	};
+
+	$("packAdd").onclick = function () {
+		filePicker(".epk", function (f) {
+			var fr = new FileReader();
+			fr.onload = function () {
+				var s = String(fr.result), c = s.indexOf(",");
+				dbPut({
+					id: "p" + Date.now(), kind: "pack", name: f.name,
+					size: f.size, data: s.slice(c + 1)
+				}).then(refreshFiles).then(function () { renderPacks(); renderPlay(); });
+			};
+			fr.readAsDataURL(f);
+		});
+	};
+	$("modAdd").onclick = function () {
+		filePicker(".js,text/javascript", function (f) {
+			var fr = new FileReader();
+			fr.onload = function () {
+				var id = "m" + Date.now();
+				dbPut({ id: id, kind: "mod", name: f.name, size: f.size, data: String(fr.result) })
+					.then(refreshFiles).then(function () {
+						cfg.mods[id] = true; saveCfg(); renderMods(); renderPlay();
+					});
+			};
+			fr.readAsText(f);
+		});
+	};
+
+	refreshFiles().then(function () {
+		renderPacks(); renderMods(); renderPlay();
+		if (location.search.indexOf("play") !== -1 && cfg.username) window.Launch();
+	}, function () { renderPacks(); renderMods(); renderPlay(); });
+});
+})();
+</script>
+</body>
